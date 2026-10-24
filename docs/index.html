@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>État de MRScoring</title>
+<meta name="description" content="Disponibilité et état des services de MRScoring, vérifiés toutes les 5 minutes.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7' fill='%2322c55e'/></svg>">
+<style>
+  /* Page de statut publique (status.mrscoring.com) : replique des signaux lumineux du Tableau de bord.
+     Donnees : status.json, ecrit toutes les 5 min par le chien de garde (branche data). */
+  :root {
+    --bg: #f5f7fb; --card: #ffffff; --ink: #172033; --muted: #5d6a82; --line: #e2e7f0;
+    --vert: #16a34a; --jaune: #ca8a04; --orange: #ea580c; --rouge: #dc2626; --gris: #94a3b8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0b1324; --card: #131d33; --ink: #e8edf7; --muted: #9aa7c0; --line: #24304a;
+      --vert: #22c55e; --jaune: #eab308; --orange: #f97316; --rouge: #ef4444; --gris: #64748b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 28px 16px 48px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+  h1 b { font-style: italic; }
+  .lang { background: none; border: 1px solid var(--line); color: var(--muted); border-radius: 999px; padding: 3px 12px; cursor: pointer; font: inherit; font-size: 13px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 18px 20px; margin-top: 16px; }
+  .banner { display: flex; align-items: center; gap: 14px; }
+  .banner strong { font-size: 18px; }
+  .dot { width: 14px; height: 14px; border-radius: 50%; flex: none; background: var(--gris); box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 18%, transparent); color: var(--gris); }
+  .big { width: 22px; height: 22px; }
+  .vert { background: var(--vert); color: var(--vert); } .jaune { background: var(--jaune); color: var(--jaune); }
+  .orange { background: var(--orange); color: var(--orange); } .rouge { background: var(--rouge); color: var(--rouge); }
+  .gris { background: var(--gris); color: var(--gris); }
+  .muted { color: var(--muted); font-size: 13px; }
+  .cats { display: grid; gap: 2px; }
+  .cat { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); }
+  .cat:last-child { border-bottom: 0; }
+  .cat .name { flex: 1; font-weight: 600; }
+  .cat .why { color: var(--muted); font-size: 13px; text-align: right; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .stat .v { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stat .l { color: var(--muted); font-size: 12.5px; }
+  .bars { display: flex; gap: 2px; height: 34px; align-items: stretch; margin-top: 12px; }
+  .bars span { flex: 1; border-radius: 3px; background: var(--gris); min-width: 2px; }
+  .legend { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-top: 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  td, th { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12.5px; }
+  .sev { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .sev .dot { width: 9px; height: 9px; box-shadow: none; }
+  footer { margin-top: 22px; color: var(--muted); font-size: 12.5px; }
+  footer a { color: inherit; }
+  @media (max-width: 560px) { .stats { grid-template-columns: repeat(2, 1fr); } .cat .why { display: none; } td:nth-child(3), th:nth-child(3) { display: none; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1><b>MR</b>Scoring · <span data-t="title"></span></h1>
+    <button class="lang" id="lang" type="button"></button>
+  </header>
+
+  <section class="card banner" aria-live="polite">
+    <span class="dot big gris" id="globalDot"></span>
+    <div><strong id="globalText">…</strong><div class="muted" id="checked"></div></div>
+  </section>
+
+  <section class="card">
+    <div class="cats" id="cats"></div>
+  </section>
+
+  <section class="card">
+    <div class="stats">
+      <div class="stat"><div class="v" id="u24">—</div><div class="l" data-t="u24"></div></div>
+      <div class="stat"><div class="v" id="u30">—</div><div class="l" data-t="u30"></div></div>
+      <div class="stat"><div class="v" id="u90">—</div><div class="l" data-t="u90"></div></div>
+      <div class="stat"><div class="v" id="days">—</div><div class="l" data-t="days"></div></div>
+    </div>
+    <div class="bars" id="bars" role="img"></div>
+    <div class="legend"><span data-t="ago90"></span><span data-t="today"></span></div>
+  </section>
+
+  <section class="card">
+    <h2 style="font-size:16px;margin:0 0 8px" data-t="incidents"></h2>
+    <table>
+      <thead><tr><th data-t="when"></th><th data-t="severity"></th><th data-t="duration"></th><th data-t="reason"></th></tr></thead>
+      <tbody id="log"></tbody>
+    </table>
+  </section>
+
+  <footer><span data-t="footer"></span> · <a href="https://app.mrscoring.com">app.mrscoring.com</a></footer>
+</main>
+
+<script>
+// Donnees publiees toutes les 5 min par le chien de garde (depot mrscoring-status, branche data).
+// En local (essai de la page), un status.json a cote de la page.
+const DATA = ["localhost", "127.0.0.1"].includes(location.hostname)
+  ? "status.json"
+  : "https://raw.githubusercontent.com/nriouxgpnrca/mrscoring-status/data/status.json";
+const T = {
+  fr: {
+    title: "État des services", u24: "Disponibilité 24 h", u30: "Disponibilité 30 jours", u90: "Disponibilité 90 jours",
+    days: "Jours sans panne", ago90: "il y a 90 jours", today: "aujourd’hui", incidents: "Journal des incidents",
+    when: "Début", severity: "Gravité", duration: "Durée", reason: "Raison", ongoing: "en cours", none: "Aucun incident.",
+    footer: "Vérifié toutes les 5 minutes, hors de l’hébergement du site", other: "English",
+    checked: (t) => `Dernière vérification : ${t}`, stale: " — données en retard",
+    global: { vert: "Tous les services fonctionnent", jaune: "Fonctionnement normal, un point à surveiller", orange: "Service dégradé", rouge: "Panne en cours", gris: "État inconnu" },
+    sev: { critique: "Critique", majeur: "Majeur", mineur: "Mineur" }, ok: "Opérationnel", unknown: "En attente",
+    error: "Impossible de lire l’état pour le moment.",
+  },
+  en: {
+    title: "Service status", u24: "Uptime 24 h", u30: "Uptime 30 days", u90: "Uptime 90 days",
+    days: "Days without outage", ago90: "90 days ago", today: "today", incidents: "Incident log",
+    when: "Start", severity: "Severity", duration: "Duration", reason: "Reason", ongoing: "ongoing", none: "No incidents.",
+    footer: "Checked every 5 minutes, outside the website’s hosting", other: "Français",
+    checked: (t) => `Last check: ${t}`, stale: " — data delayed",
+    global: { vert: "All systems operational", jaune: "Operational, one item to watch", orange: "Degraded service", rouge: "Outage in progress", gris: "Unknown status" },
+    sev: { critique: "Critical", majeur: "Major", mineur: "Minor" }, ok: "Operational", unknown: "Pending",
+    error: "Status unavailable right now.",
+  },
+};
+let lang = (() => { try { return localStorage.getItem("lang") || (navigator.language.startsWith("fr") ? "fr" : "en"); } catch { return "fr"; } })();
+let state = null;
+const $ = (id) => document.getElementById(id);
+const fmtDate = (d) => new Date(d).toLocaleString(lang === "fr" ? "fr-CA" : "en-CA", { dateStyle: "medium", timeStyle: "short" });
+const dur = (a, b) => { const m = Math.max(1, Math.round((new Date(b) - new Date(a)) / 60000)); return m < 60 ? `${m} min` : m < 1440 ? `${(m / 60).toFixed(1)} h` : `${(m / 1440).toFixed(1)} j`; };
+const pct = (v) => (v == null ? "—" : `${v.toFixed(2).replace(/\.?0+$/, "")} %`);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+function render() {
+  const t = T[lang];
+  document.documentElement.lang = lang;
+  document.querySelectorAll("[data-t]").forEach((el) => (el.textContent = t[el.dataset.t]));
+  $("lang").textContent = t.other;
+  if (!state) return;
+  const g = state.lights.global;
+  $("globalDot").className = `dot big ${g}`;
+  $("globalText").textContent = t.global[g];
+  const late = Date.now() - new Date(state.checkedAt) > 20 * 60000;
+  $("checked").textContent = t.checked(fmtDate(state.checkedAt)) + (late ? t.stale : "");
+  $("cats").innerHTML = Object.values(state.lights.categories).map((c) => {
+    const why = c.reasons.length ? c.reasons.map((r) => (lang === "fr" ? r.fr : r.en)).join(" · ") : c.color === "gris" ? t.unknown : t.ok;
+    return `<div class="cat"><span class="dot ${c.color}"></span><span class="name">${esc(lang === "fr" ? c.label : c.labelEn)}</span><span class="why">${esc(why)}</span></div>`;
+  }).join("");
+  const s = state.stats;
+  $("u24").textContent = pct(s.uptime24h); $("u30").textContent = pct(s.uptime30d); $("u90").textContent = pct(s.uptime90d);
+  $("days").textContent = s.daysWithoutOutage;
+  // 90 barres : une par jour, couleur selon la disponibilite du site ce jour-la.
+  const bars = [];
+  for (let i = 89; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 86400000).toLocaleDateString("en-CA", { timeZone: "America/Toronto" });
+    const a = state.daily[d]?.disponibilite;
+    const r = a && a.checks ? a.ok / a.checks : null;
+    const c = r == null ? "gris" : r >= 0.999 ? "vert" : r >= 0.99 ? "jaune" : r >= 0.95 ? "orange" : "rouge";
+    bars.push(`<span class="${c}" title="${d}${r == null ? "" : ` · ${pct(r * 100)}`}"></span>`);
+  }
+  $("bars").innerHTML = bars.join("");
+  const log = state.incidents.slice(0, 30);
+  $("log").innerHTML = log.length
+    ? log.map((i) => `<tr><td>${fmtDate(i.started_at)}</td><td><span class="sev"><span class="dot ${i.severity === "critique" ? "rouge" : i.severity === "majeur" ? "orange" : "jaune"}"></span>${t.sev[i.severity]}</span></td><td>${i.ended_at ? dur(i.started_at, i.ended_at) : t.ongoing}</td><td>${esc(lang === "fr" ? i.reason : i.reasonEn || i.reason)}</td></tr>`).join("")
+    : `<tr><td colspan="4" class="muted">${t.none}</td></tr>`;
+}
+
+async function load() {
+  try {
+    const res = await fetch(`${DATA}?t=${Math.floor(Date.now() / 60000)}`, { cache: "no-store" });
+    state = await res.json();
+  } catch {
+    $("globalText").textContent = T[lang].error;
+  }
+  render();
+}
+$("lang").addEventListener("click", () => { lang = lang === "fr" ? "en" : "fr"; try { localStorage.setItem("lang", lang); } catch {} render(); });
+render();
+load();
+setInterval(load, 60000);
+</script>
+</body>
+</html>

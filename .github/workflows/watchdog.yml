@@ -1,0 +1,51 @@
+# watchdog.yml - Chien de garde de MRScoring, toutes les 5 minutes (GitHub peut retarder un passage de quelques minutes).
+# Lit l'etat precedent (branche data), verifie, puis republie l'etat sur la branche data en un seul commit (pas
+# d'historique qui grossit). La page de statut (docs/, GitHub Pages) lit ce fichier.
+# Secrets : SITE_DATABASE_URL (adresse « pooler » Supabase), RESEND_API_KEY, ALERT_EMAILS (courriels separes par des virgules).
+name: Chien de garde
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: watchdog
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --omit=dev
+
+      - name: Etat precedent
+        run: |
+          mkdir -p out
+          git fetch --depth=1 origin data 2>/dev/null && git show origin/data:status.json > out/status.json || echo "{}" > out/status.json
+
+      - name: Verifications
+        env:
+          SITE_DATABASE_URL: ${{ secrets.SITE_DATABASE_URL }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          ALERT_EMAILS: ${{ secrets.ALERT_EMAILS }}
+        run: node watchdog.mjs out/status.json
+
+      - name: Publier l'etat
+        run: |
+          cd out
+          git init -q -b data
+          git add status.json
+          git -c user.name="MRScoring watchdog" -c user.email="veille@mrscoring.com" commit -q -m "Etat du $(date -u +%FT%TZ)"
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data

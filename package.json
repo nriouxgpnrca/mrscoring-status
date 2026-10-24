@@ -1,0 +1,12 @@
+{
+  "name": "mrscoring-status",
+  "private": true,
+  "description": "Chien de garde de MRScoring : verifications toutes les 5 min et page de statut publique",
+  "type": "module",
+  "scripts": {
+    "watchdog": "node watchdog.mjs status.json"
+  },
+  "dependencies": {
+    "pg": "8.13.1"
+  }
+}
