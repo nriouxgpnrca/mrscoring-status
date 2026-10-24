@@ -383,7 +383,11 @@ async function main() {
     if (!/^postgres(ql)?:\/\//.test(url)) throw Object.assign(new Error("le secret ne commence pas par postgresql://"), { code: "SECRET_FORMAT" });
     client = new pg.Client({ connectionString: url, ssl: { rejectUnauthorized: false }, connectionTimeoutMillis: 15_000, statement_timeout: 20_000 });
     await client.connect();
+    // Bonne base ? Celle du site a la table watchdog_status (046-watchdog-incidents.sql); la base Forge, non.
+    const site = (await client.query("select to_regclass('public.watchdog_status') is not null as ok")).rows[0].ok;
+    if (!site) throw Object.assign(new Error("le secret pointe vers une autre base que celle du site (Forge ?)"), { code: "MAUVAISE_BASE" });
   } catch (e) {
+    await client?.end().catch(() => {});
     state.dbError = { code: e.code ?? e.name ?? "inconnu", at: iso(now) };
     console.log(`Base injoignable pour le chien de garde : ${e.code ?? ""} ${e.message}`);
     client = null;
@@ -417,6 +421,8 @@ async function main() {
     try {
       await mirror(client, state, fullPass);
     } catch (e) {
+      // Code et message de Postgres (ex. table inconnue) : jamais l'adresse ni le mot de passe.
+      state.dbError = { code: e.code ?? "recopie", message: String(e.message).slice(0, 160), at: iso(now) };
       console.log(`Recopie dans la base : ${e.message}`);
     }
     await client.end();
