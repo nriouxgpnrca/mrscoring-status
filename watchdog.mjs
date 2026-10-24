@@ -277,12 +277,50 @@ async function email(subject, text) {
 const SEVERITY_LABEL = { critique: "PANNE CRITIQUE", majeur: "Panne majeure", mineur: "À surveiller" };
 const PAGE = "https://status.mrscoring.com";
 const DASHBOARD = `${SITE}/admin/tableau-de-bord?vue=sante`;
+const SUPABASE = "https://supabase.com/dashboard/project/ryxywyvantasahqpnjds";
+const VERCEL = "https://vercel.com/mrscoring/mrscoring-web";
+
+// Quoi faire, par service : les memes leviers que la fiche de panne de l'onglet Sante (mrscoring-web, playbook.ts),
+// pour agir directement depuis le courriel.
+const ACTIONS = {
+  site: [
+    "1. Vercel en panne pour tous ? https://www.vercel-status.com",
+    `2. Deploiement recent ? Revenir a la version d'avant (Instant Rollback) : ${VERCEL}/deployments`,
+    `3. Sinon, redeployer la derniere version (Redeploy) : ${VERCEL}/deployments`,
+  ],
+  base: [
+    "1. Supabase en panne pour tous ? https://status.supabase.com",
+    `2. Redemarrer la base (Restart project, 2-3 min de coupure) : ${SUPABASE}/settings/general`,
+    `3. Base saturee : augmenter la puissance : ${SUPABASE}/settings/compute-and-disk`,
+  ],
+  donnees: [
+    `1. Lancer un passage d'import maintenant : ${SITE}/admin/competitions`,
+    "2. Erreurs « WA 500 » : World Athletics en cause, le passage suivant reessaie seul.",
+    `3. Aucun passage depuis des heures : taches planifiees Vercel : ${VERCEL}/settings/cron-jobs`,
+  ],
+  sauvegarde: [
+    "1. Sur le PC : Planificateur de taches > « Backup MRScoring (Supabase) » > Executer (journal : D:\\Backup\\MRScoring\\backup.log).",
+    `2. En attendant, sauvegardes quotidiennes Supabase (7 jours) : ${SUPABASE}/database/backups/scheduled`,
+  ],
+  domaine: [
+    "1. Domaine : renouveler chez GoDaddy : https://dcc.godaddy.com/control/portfolio",
+    `2. Certificat : verifier app.mrscoring.com dans Vercel : ${VERCEL}/settings/domains`,
+  ],
+};
 
 async function sendAlerts(alerts, state) {
   for (const { type, inc } of alerts) {
     if (type === "open") {
-      await email(`[MRScoring] ${SEVERITY_LABEL[inc.severity]} : ${inc.reason}`,
-        `${inc.reason}\nDepuis : ${new Date(inc.started_at).toLocaleString("fr-CA", { timeZone: TZ })}\n\nÉtat en direct : ${PAGE}\nJournal : ${DASHBOARD}`);
+      await email(`[MRScoring] ${SEVERITY_LABEL[inc.severity]} : ${inc.reason}`, [
+        inc.reason,
+        `Depuis : ${new Date(inc.started_at).toLocaleString("fr-CA", { timeZone: TZ })}`,
+        "",
+        "Que faire :",
+        ...(ACTIONS[inc.category] ?? []),
+        "",
+        `Etat en direct : ${PAGE}`,
+        `Fiche de panne et journal : ${DASHBOARD}`,
+      ].join("\n"));
     } else {
       const dur = fmtDuration(new Date(inc.ended_at) - new Date(inc.started_at));
       await email(`[MRScoring] Rétabli après ${dur} : ${inc.reason}`, `${inc.reason}\nDurée : ${dur}\n\nJournal : ${DASHBOARD}`);
