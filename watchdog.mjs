@@ -334,12 +334,20 @@ async function main() {
   avail.checks++;
   if (site.up) avail.ok++;
 
+  // Adresse de la base : tolere un secret colle avec des guillemets, des espaces ou le prefixe « SITE_DATABASE_URL= ».
+  // Si la connexion echoue, le code d'erreur (jamais l'adresse ni le mot de passe) est publie dans l'etat (dbError)
+  // pour qu'on sache pourquoi sans fouiller le journal de GitHub.
+  const url = (process.env.SITE_DATABASE_URL ?? "").trim().replace(/^SITE_DATABASE_URL\s*=\s*/, "").replace(/^["']|["']$/g, "");
   let client = null;
+  state.dbError = null;
   try {
-    client = new pg.Client({ connectionString: process.env.SITE_DATABASE_URL, ssl: { rejectUnauthorized: false }, connectionTimeoutMillis: 15_000, statement_timeout: 20_000 });
+    if (!url) throw Object.assign(new Error("secret SITE_DATABASE_URL vide"), { code: "SECRET_VIDE" });
+    if (!/^postgres(ql)?:\/\//.test(url)) throw Object.assign(new Error("le secret ne commence pas par postgresql://"), { code: "SECRET_FORMAT" });
+    client = new pg.Client({ connectionString: url, ssl: { rejectUnauthorized: false }, connectionTimeoutMillis: 15_000, statement_timeout: 20_000 });
     await client.connect();
   } catch (e) {
-    console.log(`Base injoignable pour le chien de garde : ${e.message}`);
+    state.dbError = { code: e.code ?? e.name ?? "inconnu", at: iso(now) };
+    console.log(`Base injoignable pour le chien de garde : ${e.code ?? ""} ${e.message}`);
     client = null;
   }
 
