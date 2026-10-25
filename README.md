@@ -1,8 +1,13 @@
 # mrscoring-status - Chien de garde et page de statut de MRScoring
 
-Vérifie [app.mrscoring.com](https://app.mrscoring.com) **hors de son hébergement** (GitHub Actions) et publie l'état sur
-[status.mrscoring.com](https://status.mrscoring.com). Ne dépend ni de Vercel, ni de Supabase pour afficher l'état, ni
-d'un PC.
+Vérifie [app.mrscoring.com](https://app.mrscoring.com) **hors de son hébergement** (GitHub Actions), toutes les 5 minutes,
+et publie l'état sur [status.mrscoring.com](https://status.mrscoring.com) et dans l'onglet **Santé** du Tableau de bord
+(les deux lisent le même `status.json`). Ne dépend ni de Vercel, ni d'un PC, et **n'a aucun accès à la base** : le site
+fait ses vérifications de fond lui-même (`/api/health?full=1`).
+
+**Pourquoi un passage dure 5 h 40.** Le calendrier de GitHub ne lance un workflow planifié que toutes les 2 à 2,5 h.
+Chaque passage vérifie donc toutes les 5 min pendant 5 h 40, publie l'état après chaque tour, puis relance lui-même le
+suivant. Le calendrier (toutes les 2 h) est un filet de sécurité.
 
 ## Ce qui est vérifié
 
@@ -21,15 +26,14 @@ d'un PC.
 
 ## Où va l'état
 
-- `status.json` sur la branche **data** (un seul commit, remplacé à chaque passage) : lu par la page de statut.
-- Recopié dans la base du site (`watchdog_status`, `watchdog_incidents`, `watchdog_daily`) pour l'onglet **Santé**
-  du Tableau de bord. Si la base est injoignable, la recopie se fait au passage suivant.
+`status.json` sur la branche **data** (un seul commit, remplacé à chaque tour). La page de statut et l'onglet Santé le
+lisent tous deux : ils ne peuvent pas diverger.
 
 ## Mise en route (une fois)
 
 1. Dépôt public `nriouxgpnrca/mrscoring-status` sur GitHub, puis pousser ce dossier.
-2. **Settings > Secrets and variables > Actions** : `SITE_DATABASE_URL` (adresse « pooler » de la base du site, celle de
-   `secrets.env`), `RESEND_API_KEY` (la clé d'envoi de Vercel), `ALERT_EMAILS` (courriels séparés par des virgules).
+2. **Settings > Secrets and variables > Actions** : `RESEND_API_KEY` (clé d'envoi Resend), `ALERT_EMAILS` (courriels
+   séparés par des virgules). Aucun secret de base de données.
 3. **Settings > Pages** : Source = *Deploy from a branch*, branche `main`, dossier `/docs`. Domaine : `status.mrscoring.com`.
 4. **GoDaddy > DNS de mrscoring.com** : enregistrement `CNAME`, nom `status`, valeur `nriouxgpnrca.github.io`.
 5. **Actions** > *Chien de garde* > *Run workflow* pour un premier passage (ensuite toutes les 5 min).
@@ -37,8 +41,8 @@ d'un PC.
 ## Essai local
 
 ```bash
-npm ci
-SITE_DATABASE_URL=... node watchdog.mjs out/status.json
+node watchdog.mjs out/status.json
 ```
 
-Sans `RESEND_API_KEY`, les courriels sont seulement écrits dans la console.
+Un seul tour (sans `LOOP_MINUTES`), rien n'est publié (sans `PUBLISH=1`). Sans `RESEND_API_KEY`, les courriels sont
+seulement écrits dans la console. Aucune dépendance à installer.

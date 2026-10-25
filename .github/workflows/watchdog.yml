@@ -1,16 +1,21 @@
-# watchdog.yml - Chien de garde de MRScoring, toutes les 5 minutes (GitHub peut retarder un passage de quelques minutes).
-# Lit l'etat precedent (branche data), verifie, puis republie l'etat sur la branche data en un seul commit (pas
-# d'historique qui grossit). La page de statut (docs/, GitHub Pages) lit ce fichier.
-# Secrets : SITE_DATABASE_URL (adresse « pooler » Supabase), RESEND_API_KEY, ALERT_EMAILS (courriels separes par des virgules).
+# watchdog.yml - Chien de garde de MRScoring : une verification toutes les 5 minutes, 24 h sur 24.
+# Le calendrier de GitHub ne lance les workflows planifies que toutes les 2 a 2,5 h (mesure du 2026-10-24). Un passage
+# reste donc actif 5 h 40 en verifiant toutes les 5 min (LOOP_MINUTES), publie l'etat apres chaque tour (branche
+# data), puis relance lui-meme le passage suivant. Le calendrier (toutes les 2 h) n'est qu'un filet de securite : s'il
+# arrive pendant un passage, il attend son tour (concurrency) au lieu d'en lancer un second.
+# Depot public : les minutes de GitHub Actions sont gratuites et illimitees. Aucun acces a la base : le site fait ses
+# verifications de fond lui-meme (/api/health?full=1).
+# Secrets (facultatifs) : RESEND_API_KEY, ALERT_EMAILS (courriels separes par des virgules).
 name: Chien de garde
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "11 */2 * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: watchdog
@@ -19,33 +24,30 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-          cache: npm
-
-      - run: npm ci --omit=dev
 
       - name: Etat precedent
         run: |
           mkdir -p out
           git fetch --depth=1 origin data 2>/dev/null && git show origin/data:status.json > out/status.json || echo "{}" > out/status.json
 
-      - name: Verifications
+      - name: Surveillance (toutes les 5 min pendant 5 h 40)
         env:
-          SITE_DATABASE_URL: ${{ secrets.SITE_DATABASE_URL }}
+          LOOP_MINUTES: "340"
+          PUBLISH: "1"
+          GITHUB_TOKEN: ${{ github.token }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           ALERT_EMAILS: ${{ secrets.ALERT_EMAILS }}
         run: node watchdog.mjs out/status.json
 
-      - name: Publier l'etat
-        run: |
-          cd out
-          git init -q -b data
-          git add status.json
-          git -c user.name="MRScoring watchdog" -c user.email="veille@mrscoring.com" commit -q -m "Etat du $(date -u +%FT%TZ)"
-          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data
+      - name: Relancer le passage suivant
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run watchdog.yml --ref main

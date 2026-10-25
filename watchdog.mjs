@@ -1,24 +1,32 @@
 /**
- * watchdog.mjs - Chien de garde de MRScoring : verifie le site toutes les 5 min, independamment de Vercel et du PC.
+ * watchdog.mjs - Chien de garde de MRScoring : verifie le site toutes les 5 min, hors de Vercel et sans acces a la base.
  *
  * Projet : MRScoring - concu par Nelson Rioux, code avec Claude
  * Historique, versions et dates : voir git log / git blame
  *
- * Decision de Nelson (2026-10-24) : la surveillance tourne hors de ce qu'elle surveille (GitHub Actions, depot public),
- * garde son propre etat (status.json, branche data) et publie des signaux lumineux (page status.mrscoring.com et
- * onglet Sante du Tableau de bord). Usage : node watchdog.mjs <status.json> (lu puis reecrit).
+ * Decisions de Nelson (2026-10-24 et 25) :
+ *  - la surveillance tourne hors de ce qu'elle surveille (GitHub Actions, depot public), ne depend ni du PC ni de Vercel;
+ *  - une seule source de verite : status.json (branche data), lu par la page status.mrscoring.com ET par l'onglet Sante
+ *    du Tableau de bord (plus de copie dans la base, qui divergeait);
+ *  - aucun mot de passe de base dans GitHub : les verifications de fond sont faites par le site lui-meme
+ *    (/api/health?full=1), le chien de garde les lit comme un visiteur;
+ *  - un vrai 5 minutes : le calendrier de GitHub ne passait que toutes les 2 a 2,5 h. Un passage reste donc actif
+ *    LOOP_MINUTES (5 h 40 dans GitHub), verifie toutes les 5 min et publie l'etat chaque fois; le workflow relance
+ *    ensuite le passage suivant (watchdog.yml). Le calendrier GitHub reste en filet de securite.
  *
- * A chaque passage (toutes les 5 min) : le site (page de connexion) et sa base (/api/health).
- * Une fois l'heure : les services de fond, lus directement dans la base (import, fil, precalcul, taille de la base,
- * sauvegarde du jeudi) et de l'exterieur (certificat https, echeance du domaine).
- * Gravite : critique (usagers touches : site ou base en panne), majeur (service de fond manque), mineur (a surveiller).
- * Une panne s'ouvre au premier echec confirme et se ferme au retour a la normale (journal). Courriel aux admins a
- * l'ouverture et a la fermeture d'une panne critique ou majeure, et un resume le lundi.
- * Secrets (GitHub > Settings > Secrets) : SITE_DATABASE_URL (pooler Supabase), RESEND_API_KEY, ALERT_EMAILS.
+ * Toutes les 5 min : le site (page de connexion) et sa base (/api/health). Une fois l'heure : les services de fond
+ * (/api/health?full=1 : import, fil, precalcul, remplissage de la base, sauvegarde du jeudi), le certificat https et
+ * l'echeance du domaine. Gravite : critique (usagers touches), majeur (service de fond manque), mineur (a surveiller).
+ * Courriel aux admins a l'ouverture et a la fermeture d'une panne critique ou majeure, resume le lundi.
+ *
+ * Usage : node watchdog.mjs <status.json>   (un passage; LOOP_MINUTES=340 PUBLISH=1 pour le mode GitHub)
+ * Secrets (facultatifs) : RESEND_API_KEY et ALERT_EMAILS pour les courriels. GITHUB_TOKEN et GITHUB_REPOSITORY
+ * (fournis par GitHub) pour publier l'etat sur la branche data.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { execSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { connect } from "node:tls";
-import pg from "pg";
 
 const SITE = "https://app.mrscoring.com";
 const HOST = new URL(SITE).hostname;
@@ -27,12 +35,13 @@ const TZ = "America/Toronto";
 const MIN = 60_000;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
+const EVERY = 5 * MIN;
 const SLOW_MS = 5000;
 const KEEP_DAYS = 90;
 const KEEP_INCIDENTS = 200;
 const FROM = "MRScoring <veille@mrscoring.com>";
 
-export const CATEGORIES = {
+const CATEGORIES = {
   site: { fr: "Site web", en: "Website" },
   base: { fr: "Base de données", en: "Database" },
   donnees: { fr: "Imports et fil", en: "Imports and feed" },
@@ -42,11 +51,12 @@ export const CATEGORIES = {
 const RANK = { mineur: 1, majeur: 2, critique: 3 };
 const COLOR = { 0: "vert", 1: "jaune", 2: "orange", 3: "rouge" };
 
-const now = new Date();
+let now = new Date(); // heure du passage en cours (avancee a chaque tour de la boucle)
 const iso = (d) => new Date(d).toISOString();
 const dayOf = (d) => new Date(d).toLocaleDateString("en-CA", { timeZone: TZ });
 const hourOf = (d) => Number(new Intl.DateTimeFormat("en-CA", { timeZone: TZ, hour: "2-digit", hourCycle: "h23" }).format(d));
 const fmtDuration = (ms) => (ms < HOUR ? `${Math.max(1, Math.round(ms / MIN))} min` : ms < DAY ? `${(ms / HOUR).toFixed(1)} h` : `${(ms / DAY).toFixed(1)} j`);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Resultat d'une verification : ok, ou en echec avec une gravite et une raison courte (francais et anglais).
 const ok = (key, category) => ({ key, category, ok: true });
@@ -57,7 +67,7 @@ const bad = (key, category, severity, fr, en) => ({ key, category, ok: false, se
 async function fetchTimed(url) {
   const started = Date.now();
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(20_000), headers: { "User-Agent": "MRScoring-watchdog/2.0" }, redirect: "follow" });
+    const res = await fetch(url, { signal: AbortSignal.timeout(20_000), headers: { "User-Agent": "MRScoring-watchdog/3.0" }, redirect: "follow" });
     const body = await res.text();
     return { status: res.status, ms: Date.now() - started, body };
   } catch (e) {
@@ -65,27 +75,30 @@ async function fetchTimed(url) {
   }
 }
 
+const parse = (body) => {
+  try {
+    return JSON.parse(body ?? "");
+  } catch {
+    return null;
+  }
+};
+
 // Le site et sa base. Un echec est revu 20 s plus tard : un accroc reseau n'est pas une panne.
 async function probeSite() {
   let page = await fetchTimed(`${SITE}/login`);
   let health = await fetchTimed(`${SITE}/api/health`);
   if (page.status !== 200 || health.status !== 200) {
-    await new Promise((r) => setTimeout(r, 20_000));
+    await sleep(20_000);
     page = await fetchTimed(`${SITE}/login`);
     health = await fetchTimed(`${SITE}/api/health`);
   }
-  const results = [];
   const why = (r) => (r.status ? `HTTP ${r.status}` : r.error === "TimeoutError" ? "aucune réponse en 20 s" : r.error);
   const whyEn = (r) => (r.status ? `HTTP ${r.status}` : r.error === "TimeoutError" ? "no response within 20 s" : r.error);
+  const db = parse(health.body)?.db;
+  const results = [];
   if (page.status !== 200) results.push(bad("site", "site", "critique", `Site inaccessible : ${why(page)}`, `Website unreachable: ${whyEn(page)}`));
   else if (page.ms > SLOW_MS) results.push(bad("site", "site", "mineur", `Site lent : ${(page.ms / 1000).toFixed(1)} s`, `Website slow: ${(page.ms / 1000).toFixed(1)} s`));
   else results.push(ok("site", "site"));
-  let db = null;
-  try {
-    db = JSON.parse(health.body ?? "").db;
-  } catch {
-    // reponse illisible : jugee par son code HTTP
-  }
   if (page.status === 200 && (health.status !== 200 || db !== "ok")) {
     results.push(bad("base", "base", "critique", "Le site ne joint plus sa base de données", "The website cannot reach its database"));
   } else results.push(ok("base", "base"));
@@ -94,75 +107,43 @@ async function probeSite() {
 
 // -------------------------------------------------------------------------------------------------- une fois l'heure
 
-async function backgroundChecks(client) {
-  const out = [];
-  const one = async (sql) => (await client.query(sql)).rows[0];
-
-  const last = await one("select max(started_at) at from import_runs where trigger = 'cron'");
-  const silence = last.at ? now - new Date(last.at) : Infinity;
-  out.push(silence > 8 * HOUR
-    ? bad("imports", "donnees", "majeur", `Import automatique arrêté depuis ${fmtDuration(silence)}`, `Automatic import stopped for ${fmtDuration(silence)}`)
-    : ok("imports", "donnees"));
-
-  const runs = await one("select count(*) filter (where ok is false)::int failed, count(*) filter (where ok is not null)::int done from import_runs where trigger = 'cron' and started_at > now() - interval '24 hours'");
-  out.push(runs.failed >= 3 && runs.failed > runs.done / 2
-    ? bad("import-errors", "donnees", "mineur", `Erreurs d'import répétées : ${runs.failed} sur ${runs.done} en 24 h`, `Repeated import errors: ${runs.failed} of ${runs.done} in 24 h`)
-    : ok("import-errors", "donnees"));
-
-  const today = dayOf(now);
-  const feed = await one(`select count(*)::int n from feed_items where feed_date = '${today}'`);
-  // Fil vide : mineur. Le programme d'un jour peut ne rien produire (ex. samedi = recapitulatif des competitions, vide
-  // si aucune n'a ete importee); un passage qui n'a pas eu lieu est deja vu par « imports » (majeur).
-  out.push(!feed.n && hourOf(now) >= 7
-    ? bad("feed", "donnees", "mineur", "Fil du jour vide : aucune nouvelle publiée", "Today's news feed is empty")
-    : ok("feed", "donnees"));
-
-  const gap = await one("select (select count(*) from competition_results) - (select count(*) from feed_results_mv) gap");
-  out.push(Number(gap.gap) > 0
-    ? bad("feed-results", "donnees", "mineur", "Nouveaux résultats pas encore dans le fil", "New results not yet in the feed")
-    : ok("feed-results", "donnees"));
-
-  const size = await one("select pg_database_size(current_database()) bytes, (select count(*) from pg_stat_activity)::int conns, current_setting('max_connections')::int maxc");
-  const full = Number(size.bytes) / (8 * 1024 ** 3);
-  out.push(full > 0.75 || size.conns > size.maxc * 0.8
-    ? bad("db-capacity", "base", "mineur", `Base chargée : ${Math.round(full * 100)} % de l'espace, ${size.conns}/${size.maxc} connexions`, `Database busy: ${Math.round(full * 100)} % of space, ${size.conns}/${size.maxc} connections`)
-    : ok("db-capacity", "base"));
-
-  const backup = (await client.query("select at, ok from watchdog_heartbeats where source = 'backup' order by at desc limit 1")).rows[0];
-  out.push(!backup
-    ? bad("backup", "sauvegarde", "majeur", "Aucune sauvegarde notée", "No backup recorded")
-    : !backup.ok
-      ? bad("backup", "sauvegarde", "majeur", "Dernière sauvegarde en échec", "Last backup failed")
-      : now - new Date(backup.at) > 8 * DAY
-        ? bad("backup", "sauvegarde", "majeur", `Sauvegarde manquante depuis ${fmtDuration(now - new Date(backup.at))}`, `Backup missing for ${fmtDuration(now - new Date(backup.at))}`)
-        : ok("backup", "sauvegarde"));
-  return out;
+// Services de fond, verifies par le site lui-meme (aucun acces a la base ici). Site en panne : rien de neuf a lire.
+async function backgroundChecks() {
+  const r = await fetchTimed(`${SITE}/api/health?full=1`);
+  const checks = parse(r.body)?.checks;
+  if (r.status !== 200) return [];
+  if (!Array.isArray(checks)) return [bad("background", "donnees", "mineur", "Vérifications de fond indisponibles", "Background checks unavailable")];
+  return [ok("background", "donnees"), ...checks];
 }
 
 function certificateCheck() {
-  return new Promise((resolve) => {
+  return new Promise((done) => {
     const socket = connect({ host: HOST, port: 443, servername: HOST, timeout: 15_000 }, () => {
       const left = new Date(socket.getPeerCertificate().valid_to) - now;
       socket.end();
       const d = Math.floor(left / DAY);
-      resolve(left < 7 * DAY ? bad("https", "domaine", "majeur", `Certificat https expire dans ${d} j`, `https certificate expires in ${d} days`)
+      done(left < 7 * DAY ? bad("https", "domaine", "majeur", `Certificat https expire dans ${d} j`, `https certificate expires in ${d} days`)
         : left < 21 * DAY ? bad("https", "domaine", "mineur", `Certificat https expire dans ${d} j`, `https certificate expires in ${d} days`)
         : ok("https", "domaine"));
     });
-    socket.on("error", () => resolve(ok("https", "domaine"))); // une vraie panne https est vue par la verification du site
-    socket.on("timeout", () => { socket.destroy(); resolve(ok("https", "domaine")); });
+    socket.on("error", () => done(ok("https", "domaine"))); // une vraie panne https est vue par la verification du site
+    socket.on("timeout", () => { socket.destroy(); done(ok("https", "domaine")); });
   });
 }
 
 async function domainCheck() {
-  const res = await fetch(`https://rdap.verisign.com/com/v1/domain/${DOMAIN}`, { signal: AbortSignal.timeout(15_000) });
-  if (!res.ok) return ok("domain", "domaine"); // registre momentanement illisible : pas une panne du site
-  const exp = (await res.json()).events?.find((e) => e.eventAction === "expiration")?.eventDate;
-  if (!exp) return ok("domain", "domaine");
-  const d = Math.floor((new Date(exp) - now) / DAY);
-  return d < 30 ? bad("domain", "domaine", "majeur", `Domaine ${DOMAIN} expire dans ${d} j`, `Domain ${DOMAIN} expires in ${d} days`)
-    : d < 60 ? bad("domain", "domaine", "mineur", `Domaine ${DOMAIN} expire dans ${d} j`, `Domain ${DOMAIN} expires in ${d} days`)
-    : ok("domain", "domaine");
+  try {
+    const res = await fetch(`https://rdap.verisign.com/com/v1/domain/${DOMAIN}`, { signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) return ok("domain", "domaine"); // registre momentanement illisible : pas une panne du site
+    const exp = (await res.json()).events?.find((e) => e.eventAction === "expiration")?.eventDate;
+    if (!exp) return ok("domain", "domaine");
+    const d = Math.floor((new Date(exp) - now) / DAY);
+    return d < 30 ? bad("domain", "domaine", "majeur", `Domaine ${DOMAIN} expire dans ${d} j`, `Domain ${DOMAIN} expires in ${d} days`)
+      : d < 60 ? bad("domain", "domaine", "mineur", `Domaine ${DOMAIN} expire dans ${d} j`, `Domain ${DOMAIN} expires in ${d} days`)
+      : ok("domain", "domaine");
+  } catch {
+    return ok("domain", "domaine");
+  }
 }
 
 // ------------------------------------------------------------------------------------------------------------- etat
@@ -190,15 +171,12 @@ function updateIncidents(state, results, alerts) {
   state.incidents = state.incidents.slice(0, KEEP_INCIDENTS);
 }
 
-function tally(state, results) {
+function tally(state, category, good) {
   const day = dayOf(now);
   state.daily[day] ??= {};
-  const add = (category, good) => {
-    const t = (state.daily[day][category] ??= { checks: 0, ok: 0 });
-    t.checks++;
-    if (good) t.ok++;
-  };
-  for (const r of results) if (r.key !== "site" && r.key !== "base") add(r.category, r.ok);
+  const t = (state.daily[day][category] ??= { checks: 0, ok: 0 });
+  t.checks++;
+  if (good) t.ok++;
   const days = Object.keys(state.daily).sort();
   for (const d of days.slice(0, Math.max(0, days.length - KEEP_DAYS))) delete state.daily[d];
 }
@@ -242,25 +220,7 @@ function lights(state) {
   return { global: COLOR[worst], categories: cats };
 }
 
-// ---------------------------------------------------------------------------------------------- base et courriels
-
-// full (une fois l'heure) : tout l'etat garde (rattrape une base qui etait injoignable); sinon les 2 derniers jours.
-async function mirror(client, state, full) {
-  await client.query("insert into watchdog_status (id, checked_at, status) values (1, $1, $2) on conflict (id) do update set checked_at = excluded.checked_at, status = excluded.status",
-    [state.checkedAt, JSON.stringify({ lights: state.lights, stats: state.stats })]);
-  const recent = (d) => full || !d || now - new Date(d) <= 2 * DAY;
-  for (const i of state.incidents.filter((x) => recent(x.ended_at) || recent(x.started_at))) {
-    await client.query(`insert into watchdog_incidents (id, check_key, category, severity, reason, started_at, ended_at) values ($1,$2,$3,$4,$5,$6,$7)
-      on conflict (id) do update set severity = excluded.severity, reason = excluded.reason, ended_at = excluded.ended_at`,
-      [i.id, i.check_key, i.category, i.severity, i.reason, i.started_at, i.ended_at]);
-  }
-  for (const [day, cats] of Object.entries(state.daily).filter(([d]) => full || d >= dayOf(now - DAY))) {
-    for (const [category, t] of Object.entries(cats)) {
-      await client.query("insert into watchdog_daily (day, category, checks, ok) values ($1,$2,$3,$4) on conflict (day, category) do update set checks = excluded.checks, ok = excluded.ok",
-        [day, category, t.checks, t.ok]);
-    }
-  }
-}
+// ---------------------------------------------------------------------------------------------------------- courriels
 
 async function email(subject, text) {
   const key = process.env.RESEND_API_KEY;
@@ -268,7 +228,7 @@ async function email(subject, text) {
   if (!key || !to.length) return console.log(`(courriel non envoye, secrets absents) ${subject}`);
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
-    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${key.trim()}`, "Content-Type": "application/json" },
     body: JSON.stringify({ from: FROM, to, subject, text }),
   });
   if (!res.ok) console.log(`Resend ${res.status} : ${(await res.text()).slice(0, 200)}`);
@@ -280,8 +240,7 @@ const DASHBOARD = `${SITE}/admin/tableau-de-bord?vue=sante`;
 const SUPABASE = "https://supabase.com/dashboard/project/ryxywyvantasahqpnjds";
 const VERCEL = "https://vercel.com/mrscoring/mrscoring-web";
 
-// Quoi faire, par service : les memes leviers que la fiche de panne de l'onglet Sante (mrscoring-web, playbook.ts),
-// pour agir directement depuis le courriel.
+// Quoi faire, par service : les memes leviers que la fiche de panne de l'onglet Sante (mrscoring-web, playbook.ts).
 const ACTIONS = {
   site: [
     "1. Vercel en panne pour tous ? https://www.vercel-status.com",
@@ -345,10 +304,62 @@ async function sendAlerts(alerts, state) {
   }
 }
 
-// ------------------------------------------------------------------------------------------------------------ main
+// ---------------------------------------------------------------------------------------------------------- publier
+
+// Etat sur la branche data, en un seul commit remplace a chaque fois (pas d'historique qui grossit). Le jeton n'est
+// jamais affiche (sortie de git masquee).
+function publish(file) {
+  const token = process.env.GITHUB_TOKEN;
+  const repo = process.env.GITHUB_REPOSITORY;
+  if (!token || !repo) return;
+  const dir = dirname(resolve(file));
+  const run = (cmd) => execSync(cmd, { cwd: dir, stdio: "ignore" });
+  try {
+    if (!existsSync(resolve(dir, ".git"))) run("git init -q -b data");
+    run("git add status.json");
+    let first = false;
+    try {
+      run("git rev-parse -q --verify HEAD");
+    } catch {
+      first = true;
+    }
+    // Premier tour : un commit; ensuite, le meme commit est remplace (--amend) : un seul commit sur data.
+    run(`git -c user.name="MRScoring watchdog" -c user.email="veille@mrscoring.com" commit -q --allow-empty ${first ? "" : "--amend"} -m "Etat du ${iso(now)}"`);
+    run(`git push -q -f "https://x-access-token:${token}@github.com/${repo}.git" HEAD:data`);
+  } catch {
+    console.log("Publication de l'etat : echec (reessai au prochain tour)");
+  }
+}
+
+// ------------------------------------------------------------------------------------------------------------ un tour
+
+async function round(state) {
+  const results = [];
+  const site = await probeSite();
+  results.push(...site.results);
+  state.recent = [...state.recent.filter((p) => now - new Date(p.at) <= DAY), { at: iso(now), up: site.up, ms: site.ms }];
+  tally(state, "disponibilite", site.up);
+
+  if (!state.lastFullAt || now - new Date(state.lastFullAt) >= 55 * MIN) {
+    const background = [...(await backgroundChecks()), await certificateCheck(), await domainCheck()];
+    for (const r of background) tally(state, r.category, r.ok);
+    results.push(...background);
+    state.lastFullAt = iso(now);
+  }
+
+  for (const r of results) if (!state.seen.includes(r.category)) state.seen.push(r.category);
+  const alerts = [];
+  updateIncidents(state, results, alerts);
+  state.checkedAt = iso(now);
+  state.stats = stats(state);
+  state.lights = lights(state);
+  await sendAlerts(alerts, state);
+  console.log(`${iso(now)} ${state.lights.global} · site ${site.up ? "OK" : "EN PANNE"} ${site.ms} ms · ${Object.keys(state.open).length} panne(s) ouverte(s)`);
+}
 
 async function main() {
   const file = process.argv[2] ?? "status.json";
+  mkdirSync(dirname(resolve(file)), { recursive: true });
   let state = {};
   try {
     state = JSON.parse(readFileSync(file, "utf-8"));
@@ -361,74 +372,19 @@ async function main() {
   state.daily ??= {};
   state.recent ??= [];
   state.seen ??= [];
+  for (const old of ["dbError", "lastWeeklyEmail"]) delete state[old]; // champs de l'ancienne version
 
-  const results = [];
-  const site = await probeSite();
-  results.push(...site.results);
-  state.recent = [...state.recent.filter((p) => now - new Date(p.at) <= DAY), { at: iso(now), up: site.up, ms: site.ms }];
-  const day = dayOf(now);
-  state.daily[day] ??= {};
-  const avail = (state.daily[day].disponibilite ??= { checks: 0, ok: 0 });
-  avail.checks++;
-  if (site.up) avail.ok++;
-
-  // Adresse de la base : tolere un secret colle avec des guillemets, des espaces ou le prefixe « SITE_DATABASE_URL= ».
-  // Si la connexion echoue, le code d'erreur (jamais l'adresse ni le mot de passe) est publie dans l'etat (dbError)
-  // pour qu'on sache pourquoi sans fouiller le journal de GitHub.
-  const url = (process.env.SITE_DATABASE_URL ?? "").trim().replace(/^SITE_DATABASE_URL\s*=\s*/, "").replace(/^["']|["']$/g, "");
-  let client = null;
-  state.dbError = null;
-  try {
-    if (!url) throw Object.assign(new Error("secret SITE_DATABASE_URL vide"), { code: "SECRET_VIDE" });
-    if (!/^postgres(ql)?:\/\//.test(url)) throw Object.assign(new Error("le secret ne commence pas par postgresql://"), { code: "SECRET_FORMAT" });
-    client = new pg.Client({ connectionString: url, ssl: { rejectUnauthorized: false }, connectionTimeoutMillis: 15_000, statement_timeout: 20_000 });
-    await client.connect();
-    // Bonne base ? Celle du site a la table watchdog_status (046-watchdog-incidents.sql); la base Forge, non.
-    const site = (await client.query("select to_regclass('public.watchdog_status') is not null as ok")).rows[0].ok;
-    if (!site) throw Object.assign(new Error("le secret pointe vers une autre base que celle du site (Forge ?)"), { code: "MAUVAISE_BASE" });
-  } catch (e) {
-    await client?.end().catch(() => {});
-    state.dbError = { code: e.code ?? e.name ?? "inconnu", at: iso(now) };
-    console.log(`Base injoignable pour le chien de garde : ${e.code ?? ""} ${e.message}`);
-    client = null;
+  const end = Date.now() + Number(process.env.LOOP_MINUTES ?? 0) * MIN;
+  for (;;) {
+    now = new Date();
+    await round(state);
+    writeFileSync(file, JSON.stringify(state, null, 1));
+    if (process.env.PUBLISH === "1") publish(file);
+    // Prochain tour au prochain multiple de 5 min, tant qu'il reste du temps pour un tour complet.
+    const next = Math.ceil((Date.now() + 1000) / EVERY) * EVERY;
+    if (next + MIN > end) break;
+    await sleep(next - Date.now());
   }
-
-  const fullPass = !state.lastFullAt || now - new Date(state.lastFullAt) >= 55 * MIN;
-  if (fullPass) {
-    const background = [];
-    if (client) {
-      try {
-        background.push(...(await backgroundChecks(client)));
-      } catch (e) {
-        console.log(`Verifications de fond : ${e.message}`);
-      }
-    }
-    background.push(await certificateCheck(), await domainCheck().catch(() => ok("domain", "domaine")));
-    results.push(...background);
-    tally(state, background);
-    state.lastFullAt = iso(now);
-  }
-
-  for (const r of results) if (!state.seen.includes(r.category)) state.seen.push(r.category);
-  const alerts = [];
-  updateIncidents(state, results, alerts);
-  state.checkedAt = iso(now);
-  state.stats = stats(state);
-  state.lights = lights(state);
-  await sendAlerts(alerts, state);
-
-  if (client) {
-    try {
-      await mirror(client, state, fullPass);
-    } catch (e) {
-      // Code et message de Postgres (ex. table inconnue) : jamais l'adresse ni le mot de passe.
-      state.dbError = { code: e.code ?? "recopie", message: String(e.message).slice(0, 160), at: iso(now) };
-      console.log(`Recopie dans la base : ${e.message}`);
-    }
-    await client.end();
-  }
-  writeFileSync(file, JSON.stringify(state, null, 1));
-  console.log(`${state.lights.global} · site ${site.up ? "OK" : "EN PANNE"} ${site.ms} ms · ${Object.keys(state.open).length} panne(s) ouverte(s)`);
 }
 
 await main();
