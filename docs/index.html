@@ -110,6 +110,7 @@ const T = {
     global: { vert: "Tous les services fonctionnent", jaune: "Fonctionnement normal, un point à surveiller", orange: "Service dégradé", rouge: "Panne en cours", gris: "État inconnu" },
     sev: { critique: "Critique", majeur: "Majeur", mineur: "Mineur" }, ok: "Opérationnel", unknown: "En attente",
     error: "Impossible de lire l’état pour le moment.",
+    paused: "Surveillance suspendue par l’équipe",
   },
   en: {
     title: "Service status", u24: "Uptime 24 h", u30: "Uptime 30 days", u90: "Uptime 90 days",
@@ -120,6 +121,7 @@ const T = {
     global: { vert: "All systems operational", jaune: "Operational, one item to watch", orange: "Degraded service", rouge: "Outage in progress", gris: "Unknown status" },
     sev: { critique: "Critical", majeur: "Major", mineur: "Minor" }, ok: "Operational", unknown: "Pending",
     error: "Status unavailable right now.",
+    paused: "Monitoring paused by the team",
   },
 };
 let lang = (() => { try { return localStorage.getItem("lang") || (navigator.language.startsWith("fr") ? "fr" : "en"); } catch { return "fr"; } })();
@@ -136,9 +138,10 @@ function render() {
   document.querySelectorAll("[data-t]").forEach((el) => (el.textContent = t[el.dataset.t]));
   $("lang").textContent = t.other;
   if (!state) return;
-  const g = state.lights.global;
+  // Chien de garde arrete depuis l'onglet Taches : on le dit plutot que de montrer un etat fige comme s'il etait frais.
+  const g = state.paused ? "gris" : state.lights.global;
   $("globalDot").className = `dot big ${g}`;
-  $("globalText").textContent = t.global[g];
+  $("globalText").textContent = state.paused ? t.paused : t.global[g];
   const late = Date.now() - new Date(state.checkedAt) > 20 * 60000;
   $("checked").textContent = t.checked(fmtDate(state.checkedAt)) + (late ? t.stale : "");
   $("cats").innerHTML = Object.values(state.lights.categories).map((c) => {

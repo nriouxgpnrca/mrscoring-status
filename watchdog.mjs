@@ -377,6 +377,19 @@ async function main() {
   const end = Date.now() + Number(process.env.LOOP_MINUTES ?? 0) * MIN;
   for (;;) {
     now = new Date();
+    // Interrupteur de l'onglet Taches du Tableau de bord (le site le signale dans /api/health) : chien de garde
+    // arrete = plus de verification ni d'alerte, l'etat dit « surveillance arretee », et le fichier « stop » empeche
+    // le workflow de relancer le passage suivant. Site injoignable : on ne sait pas, on continue de surveiller.
+    const paused = parse((await fetchTimed(`${SITE}/api/health`)).body)?.paused ?? [];
+    state.paused = paused.includes("watchdog");
+    if (state.paused) {
+      state.checkedAt = iso(now);
+      writeFileSync(file, JSON.stringify(state, null, 1));
+      writeFileSync(resolve(dirname(resolve(file)), "stop"), "arrete dans l'onglet Taches\n");
+      if (process.env.PUBLISH === "1") publish(file);
+      console.log("Chien de garde arrete dans l'onglet Taches : fin, sans relance.");
+      break;
+    }
     await round(state);
     writeFileSync(file, JSON.stringify(state, null, 1));
     if (process.env.PUBLISH === "1") publish(file);

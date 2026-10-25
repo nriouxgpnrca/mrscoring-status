@@ -46,8 +46,10 @@ jobs:
           ALERT_EMAILS: ${{ secrets.ALERT_EMAILS }}
         run: node watchdog.mjs out/status.json
 
+      # Sauf si le chien de garde a ete arrete dans l'onglet Taches du Tableau de bord (fichier out/stop) : il reprend
+      # avec « Reprendre » puis Run workflow (ou au prochain passage du calendrier).
       - name: Relancer le passage suivant
-        if: always()
+        if: always() && hashFiles('out/stop') == ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run watchdog.yml --ref main
